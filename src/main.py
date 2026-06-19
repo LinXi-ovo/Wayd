@@ -11,11 +11,12 @@ WAYD (What Are You Doing) - 在干嘛
 """
 
 import tkinter as tk
-from tkinter import messagebox
+from tkinter import ttk, messagebox
 import sqlite3
 import random
 import threading
 import os
+import subprocess
 import signal
 import sys
 import atexit
@@ -213,12 +214,68 @@ def _cleanup():
 # ── 主入口 ──
 def main():
     root = tk.Tk()
-    root.title("在干嘛 - WAYD")
-    root.geometry("300x100")
+    root.title("在干嘛 - WAYD 控制面板")
+    root.geometry("360x260")
+    root.resizable(False, False)
     root.withdraw()
 
-    # 托盘菜单回调
+    # ── 控制面板界面 ──
+    def build_panel():
+        for w in root.winfo_children():
+            w.destroy()
+
+        main_frame = ttk.Frame(root, padding=16)
+        main_frame.pack(fill=tk.BOTH, expand=True)
+
+        ttk.Label(main_frame, text="⏰ 在干嘛 - WAYD", font=("Arial", 14, "bold")).pack(pady=(0, 8))
+        ttk.Separator(main_frame).pack(fill=tk.X, pady=4)
+
+        info_frame = ttk.Frame(main_frame)
+        info_frame.pack(fill=tk.X, pady=4)
+
+        # 统计信息
+        stats_text = tk.StringVar()
+        stats_label = ttk.Label(info_frame, textvariable=stats_text, font=("Arial", 10))
+        stats_label.pack(anchor=tk.W, pady=2)
+        refresh_stats()
+
+        # 状态信息
+        state_text = tk.StringVar(value="状态：运行中")
+        ttk.Label(info_frame, textvariable=state_text, font=("Arial", 10)).pack(anchor=tk.W, pady=2)
+
+        # 按钮
+        btn_frame = ttk.Frame(main_frame)
+        btn_frame.pack(fill=tk.X, pady=(10, 0))
+
+        ttk.Button(btn_frame, text="📊 打开数据浏览", command=open_viewer, width=25).pack(pady=3)
+        ttk.Button(btn_frame, text="📝 立即记录", command=lambda: popup_window(root), width=25).pack(pady=3)
+        ttk.Button(btn_frame, text="🔄 刷新统计", command=refresh_stats, width=25).pack(pady=3)
+
+    def refresh_stats():
+        try:
+            conn = sqlite3.connect(DB_FILE)
+            c = conn.cursor()
+            today = datetime.now().strftime("%Y-%m-%d")
+            total = c.execute("SELECT COUNT(*) FROM records").fetchone()[0]
+            today_count = c.execute("SELECT COUNT(*) FROM records WHERE date(timestamp)=?", (today,)).fetchone()[0]
+            top = c.execute("SELECT doing, COUNT(*) as c FROM records WHERE date(timestamp)=? GROUP BY doing ORDER BY c DESC LIMIT 1", (today,)).fetchone()
+            conn.close()
+            top_text = f" | 今日最多：{top[0]}" if top else ""
+            stats_text.set(f"📈 总记录：{total}  今日：{today_count}{top_text}")
+        except Exception:
+            stats_text.set("📈 统计加载失败")
+
+    def open_viewer():
+        viewer_path = os.path.join(os.path.dirname(__file__), "view.py")
+        if os.path.exists(viewer_path):
+            subprocess.Popen([sys.executable, viewer_path], shell=True)
+        else:
+            messagebox.showerror("错误", f"找不到 view.py：{viewer_path}")
+
+        root.withdraw()
+
     def _show_window(icon, item):
+        build_panel()
         root.deiconify()
         root.lift()
         root.focus_force()
@@ -249,7 +306,6 @@ def main():
     )
     icon = pystray.Icon("wayd", create_tray_image(), "在干嘛 - WAYD", menu)
 
-    # 窗口关闭事件（托盘右键退出才是正确退出方式）
     def _on_closing():
         root.withdraw()
 
@@ -271,6 +327,3 @@ def main():
         t_worker.join(timeout=3)
         icon.stop()
         t_icon.join(timeout=3)
-
-if __name__ == "__main__":
-    main()
