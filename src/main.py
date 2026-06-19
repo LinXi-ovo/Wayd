@@ -16,11 +16,12 @@ import sqlite3
 import random
 import threading
 import os
+import json
 import subprocess
 import signal
 import sys
 import atexit
-from datetime import datetime
+from datetime import datetime, timedelta
 from PIL import Image, ImageDraw, ImageGrab
 import pystray
 from win10toast import ToastNotifier
@@ -28,18 +29,42 @@ from win10toast import ToastNotifier
 # ── 配置 ──
 WORK_START = 9
 WORK_END = 23
-MIN_INTERVAL = 25 * 60
-MAX_INTERVAL = 45 * 60
 SCREENSHOT_DIR = "screenshots"
 DB_FILE = "whatido.db"
+CONFIG_FILE = "config.json"
 
 os.makedirs(SCREENSHOT_DIR, exist_ok=True)
+
+# ── 动态配置（从 config.json 加载）──
+cfg_min_interval = 25 * 60    # 默认 25 分钟
+cfg_max_interval = 45 * 60    # 默认 45 分钟
+
+def load_config():
+    global cfg_min_interval, cfg_max_interval
+    try:
+        if os.path.exists(CONFIG_FILE):
+            with open(CONFIG_FILE, "r") as f:
+                data = json.load(f)
+            cfg_min_interval = int(data.get("min_interval", cfg_min_interval))
+            cfg_max_interval = int(data.get("max_interval", cfg_max_interval))
+    except Exception as e:
+        print(f"[config] 加载失败：{e}")
+
+def save_config():
+    try:
+        with open(CONFIG_FILE, "w") as f:
+            json.dump({"min_interval": cfg_min_interval, "max_interval": cfg_max_interval}, f, indent=2)
+    except Exception as e:
+        print(f"[config] 保存失败：{e}")
+
+load_config()
 
 # ── 线程间通信 ──
 stop_event = threading.Event()      # 全局停止信号
 state_lock = threading.Lock()        # 共享状态保护锁
 popup_done = threading.Event()       # 弹窗完成信号
 _popup_active = False                # 弹窗是否正在显示
+_remaining = 0                       # 距离下次触发剩余秒数
 
 def is_popup_active():
     global _popup_active
@@ -50,6 +75,21 @@ def set_popup_active(val):
     global _popup_active
     with state_lock:
         _popup_active = val
+
+def get_remaining():
+    with state_lock:
+        return _remaining
+
+def set_remaining(val):
+    global _remaining
+    with state_lock:
+        _remaining = val
+
+def set_interval_config(min_val, max_val):
+    global cfg_min_interval, cfg_max_interval
+    cfg_min_interval = min_val
+    cfg_max_interval = max_val
+    save_config()
 
 # ── 数据库 ──
 def init_db():
@@ -164,33 +204,40 @@ def worker_loop(root):
         hour = now.hour
 
         if WORK_START <= hour < WORK_END:
-            interval = random.randint(MIN_INTERVAL, MAX_INTERVAL)
+            interval = random.randint(cfg_min_interval, cfg_max_interval)
             notify_at = max(interval - 30, 5)
+            remaining = interval
 
             # 第一阶段：等待到通知时间
-            if stop_event.wait(notify_at):
+            while remaining > notify_at and not stop_event.is_set():
+                set_remaining(remaining)
+                stop_event.wait(1)
+                remaining -= 1
+
+            if stop_event.is_set():
                 break
 
-            if not stop_event.is_set():
-                send_toast(
-                    "🔔 在干嘛 - WAYD",
-                    "半小时到了，记录一下吧！",
-                )
+            send_toast(
+                "🔔 在干嘛 - WAYD",
+                "半小时到了，记录一下吧！",
+            )
 
             # 第二阶段：等待到弹窗时间
-            remaining = interval - notify_at
-            if stop_event.wait(remaining):
-                break
+            while remaining > 0 and not stop_event.is_set():
+                set_remaining(remaining)
+                stop_event.wait(1)
+                remaining -= 1
+
+            set_remaining(0)
 
             if not stop_event.is_set():
                 popup_done.clear()
                 root.after(0, lambda: popup_window(root))
-                # 等待弹窗结束，同时每秒检查停止信号
                 while not popup_done.is_set() and not stop_event.is_set():
                     stop_event.wait(1)
 
         else:
-            # 非工作时间：每小时检查一次
+            set_remaining(-1)  # 非工作时间
             stop_event.wait(3600)
 
     print("[worker] 工作线程已退出")
@@ -215,11 +262,14 @@ def _cleanup():
 def main():
     root = tk.Tk()
     root.title("在干嘛 - WAYD 控制面板")
-    root.geometry("360x260")
+    root.geometry("380x300")
     root.resizable(False, False)
     root.withdraw()
 
     # ── 控制面板界面 ──
+    stats_text = tk.StringVar(value="📈 统计加载中...")
+    remain_text = tk.StringVar(value="距离下次触发：--")
+
     def build_panel():
         for w in root.winfo_children():
             w.destroy()
@@ -233,23 +283,37 @@ def main():
         info_frame = ttk.Frame(main_frame)
         info_frame.pack(fill=tk.X, pady=4)
 
-        # 统计信息
-        stats_text = tk.StringVar()
-        stats_label = ttk.Label(info_frame, textvariable=stats_text, font=("Arial", 10))
-        stats_label.pack(anchor=tk.W, pady=2)
+        ttk.Label(info_frame, textvariable=stats_text, font=("Arial", 10)).pack(anchor=tk.W, pady=2)
         refresh_stats()
 
-        # 状态信息
-        state_text = tk.StringVar(value="状态：运行中")
-        ttk.Label(info_frame, textvariable=state_text, font=("Arial", 10)).pack(anchor=tk.W, pady=2)
+        ttk.Label(info_frame, textvariable=remain_text, font=("Arial", 10, "bold")).pack(anchor=tk.W, pady=2)
 
-        # 按钮
         btn_frame = ttk.Frame(main_frame)
         btn_frame.pack(fill=tk.X, pady=(10, 0))
 
         ttk.Button(btn_frame, text="📊 打开数据浏览", command=open_viewer, width=25).pack(pady=3)
         ttk.Button(btn_frame, text="📝 立即记录", command=lambda: popup_window(root), width=25).pack(pady=3)
-        ttk.Button(btn_frame, text="🔄 刷新统计", command=refresh_stats, width=25).pack(pady=3)
+        ttk.Button(btn_frame, text="⚙️ 设置", command=open_settings, width=25).pack(pady=3)
+        ttk.Button(btn_frame, text="🔄 刷新", command=refresh_all, width=25).pack(pady=3)
+
+        update_remaining_display()
+
+    def update_remaining_display():
+        r = get_remaining()
+        if r < 0:
+            remain_text.set("⏳ 当前非工作时间")
+        elif r == 0:
+            remain_text.set("⏳ 即将触发...")
+        else:
+            minutes = r // 60
+            seconds = r % 60
+            remain_text.set(f"⏳ 距离下次触发：{minutes}分{seconds}秒")
+        if not stop_event.is_set():
+            root.after(1000, update_remaining_display)
+
+    def refresh_all():
+        refresh_stats()
+        update_remaining_display()
 
     def refresh_stats():
         try:
@@ -271,8 +335,50 @@ def main():
             subprocess.Popen([sys.executable, viewer_path], shell=True)
         else:
             messagebox.showerror("错误", f"找不到 view.py：{viewer_path}")
-
         root.withdraw()
+
+    def open_settings():
+        dialog = tk.Toplevel(root)
+        dialog.title("⚙️ 间隔设置")
+        dialog.geometry("320x200")
+        dialog.resizable(False, False)
+        dialog.transient(root)
+        dialog.grab_set()
+
+        frame = ttk.Frame(dialog, padding=16)
+        frame.pack(fill=tk.BOTH, expand=True)
+
+        ttk.Label(frame, text="设置弹窗间隔时间", font=("Arial", 12, "bold")).pack(pady=(0, 10))
+        ttk.Separator(frame).pack(fill=tk.X, pady=4)
+
+        ttk.Label(frame, text="下限（秒）：").pack(anchor=tk.W, pady=(6, 0))
+        min_var = tk.StringVar(value=str(cfg_min_interval))
+        min_entry = ttk.Entry(frame, textvariable=min_var, width=15)
+        min_entry.pack(anchor=tk.W, pady=2)
+
+        ttk.Label(frame, text="上限（秒）：").pack(anchor=tk.W, pady=(6, 0))
+        max_var = tk.StringVar(value=str(cfg_max_interval))
+        max_entry = ttk.Entry(frame, textvariable=max_var, width=15)
+        max_entry.pack(anchor=tk.W, pady=2)
+
+        def on_save():
+            try:
+                new_min = int(min_var.get().strip())
+                new_max = int(max_var.get().strip())
+                if new_min <= 0 or new_max <= 0:
+                    raise ValueError("必须为正数")
+                if new_min > new_max:
+                    raise ValueError("下限不能大于上限")
+                set_interval_config(new_min, new_max)
+                dialog.destroy()
+                messagebox.showinfo("成功", f"间隔已更新：{new_min} ~ {new_max} 秒")
+            except ValueError as e:
+                messagebox.showerror("输入错误", str(e))
+
+        btn_f = ttk.Frame(frame)
+        btn_f.pack(fill=tk.X, pady=(12, 0))
+        ttk.Button(btn_f, text="保存", command=on_save, width=12).pack(side=tk.LEFT, padx=5)
+        ttk.Button(btn_f, text="取消", command=dialog.destroy, width=12).pack(side=tk.LEFT, padx=5)
 
     def _show_window(icon, item):
         build_panel()
@@ -286,9 +392,12 @@ def main():
     def _show_status(icon, item):
         now_str = datetime.now().strftime("%H:%M:%S")
         popup = "是" if is_popup_active() else "否"
+        r = get_remaining()
+        remain_str = "非工作时间" if r < 0 else f"{r}秒后"
         root.after(0, lambda: messagebox.showinfo(
             "WAYD 状态",
-            f"运行状态：正常\n当前时间：{now_str}\n弹窗中：{popup}"
+            f"运行状态：正常\n当前时间：{now_str}\n弹窗中：{popup}\n"
+            f"间隔设置：{cfg_min_interval}s ~ {cfg_max_interval}s\n距离下次：{remain_str}"
         ))
 
     def _quit_app(icon, item):
@@ -327,3 +436,6 @@ def main():
         t_worker.join(timeout=3)
         icon.stop()
         t_icon.join(timeout=3)
+
+if __name__ == "__main__":
+    main()
