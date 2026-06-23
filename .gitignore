@@ -5,6 +5,12 @@ build/
 dist/
 wheels/
 *.egg-info
+whatido.db
+screenshots
+config.json
 
 # Virtual environments
 .venv
+
+# Release archives
+Release/v*/

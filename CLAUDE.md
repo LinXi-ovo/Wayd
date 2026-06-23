@@ -44,4 +44,3 @@ uv sync
 - Screenshots are always captured before showing the popup, regardless of whether user submits
 - `delete_records` physically moves screenshots to `screenshots/trash/` before DB deletion
 - The AI analysis placeholder at `trigger_ai_analysis()` is a no-op hook for future integration
-- `nextStep.md` outlines a planned soft-delete+recycle-bin feature not yet implemented in code
