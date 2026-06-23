@@ -11,4 +11,6 @@ dependencies = [
     "pystray>=0.19.5",
     "setuptools<68",
     "win10toast>=0.9",
+    "python-docx>=1.1.2",
+    "fpdf2>=2.8.2",
 ]
