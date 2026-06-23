@@ -22,15 +22,19 @@ English | [中文](#中文)
 - **✏️ CRUD Operations** — Add, edit, delete records with screenshot trash management
 - **🗑️ Safe Delete** — Screenshots moved to `screenshots/trash/` before DB deletion
 - **⚙️ Configurable** — Adjustable interval via Settings dialog in control panel
+- **📝 Notes** — CLI note-taking tool with step sequence tracking and tag support (e.g., `-t x` for error collection)
+- **🏷️ Tags** — Categorize notes with tags, filter by tag in the notes viewer
+- **🔍 Note Viewer** — Browse/search/filter notes by tag, keyword, date in a dedicated viewer window
 
 ### Architecture
 
-Two standalone Python scripts sharing a SQLite database:
+Three Python scripts sharing a SQLite database:
 
 | Script | Description |
 |--------|-------------|
 | `src/main.py` | Background daemon with system tray, worker loop, and popup window |
 | `src/view.py` | History manager with Treeview, filtering, and record management |
+| `src/note.py` | CLI note-taking tool (`note <step> <content> -t <tag>`) |
 
 ### Quick Start
 
@@ -41,8 +45,17 @@ uv sync
 # Run the popup daemon
 uv run python src/main.py
 
-# Run the history viewer
+# Run the history viewer (includes Notes viewer button)
 uv run python src/view.py
+
+# Record a note with tag (e.g., "x" = 错题集 / error collection)
+uv run python src/note.py a13 "把1抄成了-1" -t x
+
+# List notes filtered by tag
+uv run python src/note.py list -t x
+
+# View note statistics
+uv run python src/note.py stats
 ```
 
 ### Database Schema
@@ -58,6 +71,16 @@ Table `records`:
 | `screenshot_path` | TEXT | Path to screenshot |
 | `ai_analysis` | TEXT | Placeholder for AI analysis |
 
+Table `notes`:
+
+| Column | Type | Description |
+|--------|------|-------------|
+| `id` | INTEGER PK | Auto-increment |
+| `timestamp` | TEXT | ISO format datetime |
+| `step_sequence` | TEXT | Step/problem identifier (e.g., `a13`) |
+| `content` | TEXT | Note content |
+| `tags` | TEXT | Tags for categorization (e.g., `x` = 错题集) |
+
 ### Requirements
 
 - Python >= 3.13
@@ -69,9 +92,12 @@ Table `records`:
 ```
 ├── src/
 │   ├── main.py          # Background daemon & system tray
-│   └── view.py          # History viewer & management
+│   ├── view.py          # History viewer & management (+ Notes viewer)
+│   └── note.py          # CLI note-taking tool
 ├── screenshots/         # Captured screenshots (auto-created)
 │   └── trash/           # Deleted screenshots
+├── Release/
+│   └── v1/              # Distributable source package
 ├── pyproject.toml       # Project configuration
 ├── whatido.db           # SQLite database (auto-created)
 ├── config.json          # Interval settings (auto-created)
@@ -96,15 +122,19 @@ Table `records`:
 - **✏️ 增删改查** — 新增、编辑、删除记录，截图自动移入回收站
 - **🗑️ 安全删除** — 删除记录时截图移至 `screenshots/trash/`，而非直接丢弃
 - **⚙️ 间隔设置** — 控制面板可调整随机间隔范围
+- **📝 笔记记录** — 命令行工具，按步骤序列记录笔记，支持标签分类
+- **🏷️ 标签系统** — `-t x` 快速标记错题集等分类，支持按标签筛选
+- **🔍 笔记查看** — 在 view.py 中内嵌笔记查看器，支持标签/关键词/日期筛选
 
 ### 架构
 
-两个独立的 Python 脚本共享一个 SQLite 数据库：
+三个 Python 脚本共享一个 SQLite 数据库：
 
 | 脚本 | 说明 |
 |------|------|
 | `src/main.py` | 后台守护程序：系统托盘、工作循环、弹窗 |
-| `src/view.py` | 历史管理器：表格视图、筛选、增删改查 |
+| `src/view.py` | 历史管理器：表格视图、筛选、增删改查（含笔记查看器） |
+| `src/note.py` | 笔记 CLI 工具：`note <步骤> <内容> -t <标签>` |
 
 ### 快速开始
 
@@ -115,8 +145,17 @@ uv sync
 # 启动后台弹窗守护程序
 uv run python src/main.py
 
-# 启动历史记录查看器
+# 启动历史记录查看器（含笔记查看按钮）
 uv run python src/view.py
+
+# 记录一条笔记（标签 x = 错题集）
+uv run python src/note.py a13 "把1抄成了-1" -t x
+
+# 按标签查看笔记
+uv run python src/note.py list -t x
+
+# 查看笔记统计
+uv run python src/note.py stats
 ```
 
 ### 数据库表结构

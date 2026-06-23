@@ -180,6 +180,7 @@ class Viewer:
         ttk.Button(tool_frame, text="新增", command=self.add_record_dialog).pack(side=tk.LEFT, padx=2)
         ttk.Button(tool_frame, text="编辑", command=self.edit_record).pack(side=tk.LEFT, padx=2)
         ttk.Button(tool_frame, text="删除选中", command=self.delete_selected).pack(side=tk.LEFT, padx=2)
+        ttk.Button(tool_frame, text="📝 笔记", command=self.open_notes_viewer).pack(side=tk.LEFT, padx=2)
 
         # 统计信息
         self.stats_label = ttk.Label(root, text="", font=("Arial", 10))
@@ -388,7 +389,237 @@ class Viewer:
         except Exception as e:
             messagebox.showerror("打开失败", f"无法打开截图：{e}")
 
-if __name__ == "__main__":
+    # ---------- 笔记视图 ----------
+    def open_notes_viewer(self):
+        """打开笔记查看器窗口"""
+        # 确保 notes 表存在
+        from note import init_notes_db
+        init_notes_db()
+        NotesViewer(self.root)
+
+
+# ═══════════════════════════════════════════════
+#  笔记查看器
+# ═══════════════════════════════════════════════
+class NotesViewer:
+    """笔记浏览窗口，支持标签/关键词/日期筛选"""
+
+    def __init__(self, master):
+        self.master = master
+        self.win = tk.Toplevel(master)
+        self.win.title("📝 WAYD 笔记查看器")
+        self.win.geometry("860x600")
+
+        self.current_tag = None
+        self.current_keyword = None
+        self.current_date = None
+        self.page = 0
+        self.page_size = 100
+
+        # ── 顶部筛选栏 ──
+        top_frame = ttk.Frame(self.win)
+        top_frame.pack(pady=8, fill=tk.X)
+
+        ttk.Label(top_frame, text="标签:").pack(side=tk.LEFT, padx=5)
+        self.tag_var = tk.StringVar()
+        tag_entry = ttk.Entry(top_frame, textvariable=self.tag_var, width=12)
+        tag_entry.pack(side=tk.LEFT, padx=5)
+
+        ttk.Label(top_frame, text="关键词:").pack(side=tk.LEFT, padx=5)
+        self.keyword_var = tk.StringVar()
+        kw_entry = ttk.Entry(top_frame, textvariable=self.keyword_var, width=15)
+        kw_entry.pack(side=tk.LEFT, padx=5)
+
+        ttk.Label(top_frame, text="日期:").pack(side=tk.LEFT, padx=5)
+        self.date_var = tk.StringVar()
+        date_entry = ttk.Entry(top_frame, textvariable=self.date_var, width=12)
+        date_entry.pack(side=tk.LEFT, padx=5)
+
+        ttk.Button(top_frame, text="搜索", command=self.refresh, width=6).pack(side=tk.LEFT, padx=3)
+        ttk.Button(top_frame, text="重置", command=self.reset_filters, width=6).pack(side=tk.LEFT, padx=3)
+
+        # ── 操作工具栏 ──
+        tool_frame = ttk.Frame(self.win)
+        tool_frame.pack(pady=4, fill=tk.X)
+        ttk.Button(tool_frame, text="新增笔记", command=self.add_note_dialog).pack(side=tk.LEFT, padx=2)
+        ttk.Button(tool_frame, text="删除选中", command=self.delete_selected).pack(side=tk.LEFT, padx=2)
+        ttk.Button(tool_frame, text="统计", command=self.show_stats).pack(side=tk.LEFT, padx=2)
+
+        # ── 统计信息 ──
+        self.stats_label = ttk.Label(self.win, text="", font=("Arial", 10))
+        self.stats_label.pack(pady=4)
+
+        # ── 表格 ──
+        columns = ("id", "timestamp", "step_sequence", "content", "tags")
+        self.tree = ttk.Treeview(self.win, columns=columns, show="headings", height=18, selectmode="extended")
+        self.tree.heading("id", text="ID")
+        self.tree.heading("timestamp", text="时间")
+        self.tree.heading("step_sequence", text="步骤")
+        self.tree.heading("content", text="笔记内容")
+        self.tree.heading("tags", text="标签")
+
+        self.tree.column("id", width=50, anchor=tk.CENTER)
+        self.tree.column("timestamp", width=160)
+        self.tree.column("step_sequence", width=80, anchor=tk.CENTER)
+        self.tree.column("content", width=340)
+        self.tree.column("tags", width=120, anchor=tk.CENTER)
+
+        scrollbar = ttk.Scrollbar(self.win, orient=tk.VERTICAL, command=self.tree.yview)
+        self.tree.configure(yscrollcommand=scrollbar.set)
+        self.tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=(10, 0), pady=(0, 8))
+        scrollbar.pack(side=tk.RIGHT, fill=tk.Y, padx=(0, 10), pady=(0, 8))
+
+        # ── 底部翻页 ──
+        bottom_frame = ttk.Frame(self.win)
+        bottom_frame.pack(pady=6)
+        ttk.Button(bottom_frame, text="上一页", command=self.prev_page).pack(side=tk.LEFT, padx=5)
+        self.page_label = ttk.Label(bottom_frame, text="第 1 页")
+        self.page_label.pack(side=tk.LEFT, padx=10)
+        ttk.Button(bottom_frame, text="下一页", command=self.next_page).pack(side=tk.LEFT, padx=5)
+
+        self.load_page()
+
+    # ── 数据库操作 ──
+    def _get_notes(self):
+        """从 note 模块查询笔记"""
+        from note import get_notes, get_note_stats
+        rows = get_notes(
+            tag=self.current_tag,
+            keyword=self.current_keyword,
+            date_str=self.current_date,
+            limit=self.page_size,
+            offset=self.page * self.page_size,
+        )
+        total, tag_stats = get_note_stats(tag=self.current_tag, date_str=self.current_date)
+        return rows, total, tag_stats
+
+    # ── 加载 / 刷新 ──
+    def refresh(self):
+        self.current_tag = self.tag_var.get().strip() or None
+        self.current_keyword = self.keyword_var.get().strip() or None
+        self.current_date = self.date_var.get().strip() or None
+        self.page = 0
+        self.load_page()
+
+    def reset_filters(self):
+        self.tag_var.set("")
+        self.keyword_var.set("")
+        self.date_var.set("")
+        self.current_tag = None
+        self.current_keyword = None
+        self.current_date = None
+        self.page = 0
+        self.load_page()
+
+    def load_page(self):
+        self.tree.delete(*self.tree.get_children())
+        rows, total, tag_stats = self._get_notes()
+
+        for r in rows:
+            self.tree.insert("", tk.END, values=r)
+
+        # 更新统计
+        parts = [f"📊 总笔记数：{total}"]
+        if tag_stats and not self.current_tag:
+            top_tags = ", ".join(f"[{t}]{c}" for t, c in tag_stats[:3] if t)
+            if top_tags:
+                parts.append(f"热门标签：{top_tags}")
+        self.stats_label.config(text="  |  ".join(parts))
+        self.page_label.config(text=f"第 {self.page + 1} 页")
+
+    def prev_page(self):
+        if self.page > 0:
+            self.page -= 1
+            self.load_page()
+
+    def next_page(self):
+        from note import get_notes
+        test = get_notes(
+            tag=self.current_tag, keyword=self.current_keyword,
+            date_str=self.current_date, limit=1,
+            offset=(self.page + 1) * self.page_size,
+        )
+        if test:
+            self.page += 1
+            self.load_page()
+        else:
+            messagebox.showinfo("提示", "已是最后一页")
+
+    # ── 获取选中 ID ──
+    def get_selected_ids(self):
+        ids = []
+        for item in self.tree.selection():
+            values = self.tree.item(item, "values")
+            if values:
+                ids.append(int(values[0]))
+        return ids
+
+    # ── 新增笔记 ──
+    def add_note_dialog(self):
+        dialog = tk.Toplevel(self.win)
+        dialog.title("新增笔记")
+        dialog.geometry("380x200")
+        dialog.transient(self.win)
+        dialog.grab_set()
+
+        frame = ttk.Frame(dialog, padding=12)
+        frame.pack(fill=tk.BOTH, expand=True)
+
+        ttk.Label(frame, text="步骤序列:").grid(row=0, column=0, sticky=tk.W, pady=4)
+        seq_entry = ttk.Entry(frame, width=30)
+        seq_entry.grid(row=0, column=1, pady=4, padx=5)
+        seq_entry.focus()
+
+        ttk.Label(frame, text="笔记内容:").grid(row=1, column=0, sticky=tk.W, pady=4)
+        content_entry = ttk.Entry(frame, width=30)
+        content_entry.grid(row=1, column=1, pady=4, padx=5)
+
+        ttk.Label(frame, text="标签:").grid(row=2, column=0, sticky=tk.W, pady=4)
+        tag_entry = ttk.Entry(frame, width=30)
+        tag_entry.grid(row=2, column=1, pady=4, padx=5)
+        tag_entry.insert(0, "x")  # 默认错题集标签
+
+        def submit():
+            seq = seq_entry.get().strip()
+            content = content_entry.get().strip()
+            tag = tag_entry.get().strip()
+            if not content:
+                messagebox.showwarning("提示", "笔记内容不能为空")
+                return
+            from note import add_note
+            note_id = add_note(seq, content, tag)
+            dialog.destroy()
+            self.refresh()
+            messagebox.showinfo("成功", f"笔记已添加 [ID={note_id}]")
+
+        btn_f = ttk.Frame(frame)
+        btn_f.grid(row=3, column=0, columnspan=2, pady=12)
+        ttk.Button(btn_f, text="确定", command=submit, width=10).pack(side=tk.LEFT, padx=5)
+        ttk.Button(btn_f, text="取消", command=dialog.destroy, width=10).pack(side=tk.LEFT, padx=5)
+
+    # ── 删除笔记 ──
+    def delete_selected(self):
+        ids = self.get_selected_ids()
+        if not ids:
+            messagebox.showwarning("提示", "请先选择要删除的笔记")
+            return
+        if messagebox.askyesno("确认删除", f"确定要删除选中的 {len(ids)} 条笔记吗？"):
+            from note import delete_notes
+            deleted = delete_notes(ids)
+            self.refresh()
+            messagebox.showinfo("成功", f"已删除 {deleted} 条笔记")
+
+    # ── 统计弹窗 ──
+    def show_stats(self):
+        from note import get_note_stats
+        total, tag_stats = get_note_stats()
+        msg = [f"📊 总笔记数：{total}"]
+        if tag_stats:
+            msg.append("\n\n标签分布：")
+            for tag, cnt in tag_stats:
+                tag_display = tag if tag else "(无标签)"
+                msg.append(f"  [{tag_display}] {cnt} 条")
+        messagebox.showinfo("笔记统计", "\n".join(msg), parent=self.win)
     if not os.path.exists(DB_FILE):
         messagebox.showerror("错误", f"数据库文件 {DB_FILE} 不存在，请先运行主程序记录数据。")
         exit(1)

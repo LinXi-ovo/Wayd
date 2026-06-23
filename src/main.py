@@ -105,6 +105,15 @@ def init_db():
             ai_analysis TEXT
         )
     ''')
+    c.execute('''
+        CREATE TABLE IF NOT EXISTS notes (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            timestamp TEXT NOT NULL,
+            step_sequence TEXT,
+            content TEXT NOT NULL,
+            tags TEXT DEFAULT ''
+        )
+    ''')
     conn.commit()
     conn.close()
 
