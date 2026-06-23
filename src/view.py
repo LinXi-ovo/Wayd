@@ -8,6 +8,7 @@ from datetime import datetime
 import os
 import subprocess
 
+import backup
 from exporter import export_docx as _export_docx, export_pdf as _export_pdf
 
 DB_FILE = "whatido.db"
@@ -185,6 +186,10 @@ class Viewer:
         ttk.Separator(tool_frame, orient=tk.VERTICAL).pack(side=tk.LEFT, fill=tk.Y, padx=6)
         ttk.Button(tool_frame, text="📄导出DOCX", command=self.export_docx).pack(side=tk.LEFT, padx=2)
         ttk.Button(tool_frame, text="📄导出PDF", command=self.export_pdf).pack(side=tk.LEFT, padx=2)
+        ttk.Separator(tool_frame, orient=tk.VERTICAL).pack(side=tk.LEFT, fill=tk.Y, padx=6)
+        ttk.Button(tool_frame, text="📦 新建基线", command=self.backup_create_base).pack(side=tk.LEFT, padx=2)
+        ttk.Button(tool_frame, text="📦 增量备份", command=self.backup_create_incremental).pack(side=tk.LEFT, padx=2)
+        ttk.Button(tool_frame, text="📋 备份历史", command=self.backup_show_history).pack(side=tk.LEFT, padx=2)
 
         # 统计信息
         self.stats_label = ttk.Label(root, text="", font=("Arial", 10))
@@ -402,10 +407,249 @@ class Viewer:
         except Exception as e:
             messagebox.showerror("打开失败", f"无法打开截图：{e}")
 
+
+    # ========== 备份功能 ==========
+
+    def backup_create_base(self):
+        """创建基线备份（弹出模式选择对话框）"""
+        dialog = tk.Toplevel(self.root)
+        dialog.title("📦 新建基线备份")
+        dialog.geometry("340x200")
+        dialog.resizable(False, False)
+        dialog.transient(self.root)
+        dialog.grab_set()
+
+        frame = ttk.Frame(dialog, padding=16)
+        frame.pack(fill=tk.BOTH, expand=True)
+
+        ttk.Label(frame, text="创建基线备份（全量快照）", font=("Arial", 12, "bold")).pack(pady=(0, 10))
+        ttk.Separator(frame).pack(fill=tk.X, pady=4)
+
+        mode_var = tk.StringVar(value="text")
+        ttk.Radiobutton(frame, text="📝 纯文本（仅记录文字）", variable=mode_var, value="text").pack(anchor=tk.W, pady=4)
+        ttk.Radiobutton(frame, text="📷 完整备份（含截图）", variable=mode_var, value="full").pack(anchor=tk.W, pady=4)
+
+        btn_f = ttk.Frame(frame)
+        btn_f.pack(fill=tk.X, pady=(12, 0))
+
+        def do_backup():
+            mode = mode_var.get()
+            result = backup.create_base_backup(mode)
+            if result:
+                label = "纯文本" if mode == "text" else "完整"
+                dialog.destroy()
+                messagebox.showinfo(
+                    "✅ 基线备份成功",
+                    f"模式：{label}\n记录数：{result['record_count']} 条\n备份 ID：{result['id']}\n文件：{result['file']}"
+                )
+            else:
+                messagebox.showwarning("提示", "没有记录可备份，或创建失败。")
+
+        ttk.Button(btn_f, text="开始备份", command=do_backup, width=15).pack(side=tk.LEFT, padx=5)
+        ttk.Button(btn_f, text="取消", command=dialog.destroy, width=15).pack(side=tk.LEFT, padx=5)
+
+    def backup_create_incremental(self):
+        """创建增量备份（选择基线）"""
+        chains = backup.get_chains()
+        if not chains:
+            messagebox.showwarning("提示", "没有可用的基线备份。\n请先创建基线备份。")
+            return
+
+        dialog = tk.Toplevel(self.root)
+        dialog.title("📦 选择基线创建增量备份")
+        dialog.geometry("600x400")
+        dialog.transient(self.root)
+        dialog.grab_set()
+
+        ttk.Label(dialog, text="选择一条基线，在其基础上创建增量备份：", font=("Arial", 10)).pack(pady=(10, 5))
+
+        frame = ttk.Frame(dialog)
+        frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=5)
+
+        columns = ("id", "mode", "created", "records", "chain_len")
+        tree = ttk.Treeview(frame, columns=columns, show="headings", height=12, selectmode="browse")
+        tree.heading("id", text="基线 ID")
+        tree.heading("mode", text="模式")
+        tree.heading("created", text="创建时间")
+        tree.heading("records", text="记录数")
+        tree.heading("chain_len", text="链长度")
+        tree.column("id", width=200)
+        tree.column("mode", width=80)
+        tree.column("created", width=160)
+        tree.column("records", width=80)
+        tree.column("chain_len", width=80)
+
+        scrollbar = ttk.Scrollbar(frame, orient=tk.VERTICAL, command=tree.yview)
+        tree.configure(yscrollcommand=scrollbar.set)
+        tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+
+        for c in chains:
+            b = c["base"]
+            tree.insert("", tk.END, values=(
+                b["id"], "纯文本" if b["mode"] == "text" else "完整",
+                b["created_at"], b["record_count"],
+                f"1 → {c['length']}"
+            ))
+
+        btn_f = ttk.Frame(dialog)
+        btn_f.pack(fill=tk.X, pady=10, padx=10)
+
+        def do_incremental():
+            sel = tree.selection()
+            if not sel:
+                messagebox.showwarning("提示", "请先选择一条基线。")
+                return
+            item = tree.item(sel[0])
+            base_id = item["values"][0]
+            result = backup.create_incremental_backup(base_id)
+            if result:
+                dialog.destroy()
+                messagebox.showinfo(
+                    "✅ 增量备份成功",
+                    f"新增记录数：{result['record_count']} 条\n"
+                    f"备份 ID：{result['id']}\n"
+                    f"基于：{result['parent_id']}"
+                )
+            else:
+                messagebox.showwarning("提示", "没有新增记录，跳过增量备份。")
+
+        ttk.Button(btn_f, text="创建增量备份", command=do_incremental, width=20).pack(side=tk.LEFT, padx=5)
+        ttk.Button(btn_f, text="取消", command=dialog.destroy, width=15).pack(side=tk.LEFT, padx=5)
+
+    def backup_show_history(self):
+        """打开备份历史管理窗口"""
+        BackupHistoryDialog(self.root)
+
+
+class BackupHistoryDialog:
+    """备份历史管理窗口 — 显示所有备份链，支持查看内容和删除"""
+    def __init__(self, master):
+        self.master = master
+        self.win = tk.Toplevel(master)
+        self.win.title("📋 备份历史")
+        self.win.geometry("900x550")
+
+        top = ttk.Frame(self.win)
+        top.pack(pady=8, fill=tk.X)
+        ttk.Label(top, text="所有备份链", font=("Arial", 12, "bold")).pack(side=tk.LEFT, padx=10)
+        ttk.Button(top, text="🔄 刷新", command=self.load_data).pack(side=tk.RIGHT, padx=5)
+        ttk.Button(top, text="查看内容", command=self.view_content).pack(side=tk.RIGHT, padx=5)
+        ttk.Button(top, text="删除", command=self.delete_selected).pack(side=tk.RIGHT, padx=5)
+
+        columns = ("type", "id", "mode", "created", "records", "file")
+        self.tree = ttk.Treeview(self.win, columns=columns, show="tree headings", height=20, selectmode="browse")
+        for col, label in [("type", "类型"), ("id", "ID"), ("mode", "模式"), ("created", "创建时间"), ("records", "记录数"), ("file", "文件")]:
+            self.tree.heading(col, text=label)
+        self.tree.column("type", width=80)
+        self.tree.column("id", width=200)
+        self.tree.column("mode", width=70)
+        self.tree.column("created", width=170)
+        self.tree.column("records", width=70)
+        self.tree.column("file", width=250)
+
+        scrollbar = ttk.Scrollbar(self.win, orient=tk.VERTICAL, command=self.tree.yview)
+        self.tree.configure(yscrollcommand=scrollbar.set)
+        self.tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=(10,0), pady=(0,10))
+        scrollbar.pack(side=tk.RIGHT, fill=tk.Y, padx=(0,10), pady=(0,10))
+
+        self.load_data()
+
+    def load_data(self):
+        self.tree.delete(*self.tree.get_children())
+        chains = backup.get_chains()
+        for c in chains:
+            base = c["base"]
+            parent_iid = self.tree.insert("", tk.END, values=(
+                "📦 基线", base["id"],
+                "纯文本" if base["mode"] == "text" else "完整",
+                base["created_at"], base["record_count"], base["file"]
+            ), open=True)
+            for inc in c.get("chain", [])[1:]:
+                self.tree.insert(parent_iid, tk.END, values=(
+                    "➕ 增量", inc["id"],
+                    "-", inc["created_at"], inc["record_count"], inc["file"]
+                ))
+        if not chains:
+            self.tree.insert("", tk.END, values=("-", "（暂无备份）", "", "", "", ""))
+
+    def get_selected_entry_id(self):
+        sel = self.tree.selection()
+        if not sel:
+            messagebox.showwarning("提示", "请先选择一条备份。")
+            return None
+        values = self.tree.item(sel[0], "values")
+        if not values or len(values) < 2:
+            return None
+        eid = values[1]
+        if eid and (eid.startswith("base_") or eid.startswith("inc_")):
+            return eid
+        return None
+
+    def view_content(self):
+        eid = self.get_selected_entry_id()
+        if not eid:
+            return
+        detail = backup.get_backup_detail(eid)
+        if not detail:
+            messagebox.showerror("错误", "备份条目不存在。")
+            return
+
+        records = backup.get_all_records_in_chain_up_to(eid)
+        if not records:
+            messagebox.showinfo("内容", "该备份无记录数据。")
+            return
+
+        dlg = tk.Toplevel(self.win)
+        dlg.title(f"📋 备份内容 — {eid}")
+        dlg.geometry("700x400")
+
+        info = ttk.Label(dlg, text=f"记录数：{len(records)} 条 | 模式：{'纯文本' if detail['mode']=='text' else '完整'} | 文件：{detail['file']}")
+        info.pack(pady=5)
+
+        txt = tk.Text(dlg, wrap=tk.WORD, font=("Consolas", 9))
+        txt.pack(fill=tk.BOTH, expand=True, padx=10, pady=5)
+
+        for i, r in enumerate(records, 1):
+            txt.insert(tk.END, f"#{i}  ID:{r['id']}  {r['timestamp']}\n")
+            txt.insert(tk.END, f"    在干嘛：{r['doing']}\n")
+            txt.insert(tk.END, f"    下一步：{r['next_plan']}\n")
+            sp = r.get("screenshot_path", "")
+            if sp:
+                txt.insert(tk.END, f"    截图：{os.path.basename(sp) if os.path.exists(sp) else sp}\n")
+            txt.insert(tk.END, f"    {'─' * 50}\n")
+
+        txt.config(state=tk.DISABLED)
+        scrollbar = ttk.Scrollbar(dlg, orient=tk.VERTICAL, command=txt.yview)
+        txt.configure(yscrollcommand=scrollbar.set)
+        scrollbar.pack(side=tk.RIGHT, fill=tk.Y, pady=5, padx=(0,10))
+
+        ttk.Button(dlg, text="关闭", command=dlg.destroy, width=15).pack(pady=8)
+
+    def delete_selected(self):
+        eid = self.get_selected_entry_id()
+        if not eid:
+            return
+        detail = backup.get_backup_detail(eid)
+        if not detail:
+            return
+        if detail.get("child_id"):
+            messagebox.showwarning("无法删除", "该备份有后继增量备份，请先删除子节点。")
+            return
+        if not messagebox.askyesno("确认删除", f"确定要删除备份「{eid}」？\n此操作不可恢复！"):
+            return
+        if backup.delete_backup(eid):
+            messagebox.showinfo("成功", f"已删除备份：{eid}")
+            self.load_data()
+        else:
+            messagebox.showerror("错误", "删除失败，请检查是否有子节点未删除。")
+
+
 if __name__ == "__main__":
     if not os.path.exists(DB_FILE):
         messagebox.showerror("错误", f"数据库文件 {DB_FILE} 不存在，请先运行主程序记录数据。")
         exit(1)
+    backup.init_backup_dir()
     root = tk.Tk()
     app = Viewer(root)
     root.mainloop()
