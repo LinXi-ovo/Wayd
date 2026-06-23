@@ -1,0 +1,14 @@
+[project]
+name = "whatareyoudoing-wayd"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.13"
+dependencies = [
+    "pillow>=12.2.0",
+    "plyer>=2.1.0",
+    "pyautogui>=0.9.54",
+    "pystray>=0.19.5",
+    "setuptools<68",
+    "win10toast>=0.9",
+]
