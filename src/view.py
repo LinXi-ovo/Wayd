@@ -185,6 +185,7 @@ class Viewer:
         ttk.Button(tool_frame, text="删除选中", command=self.delete_selected).pack(side=tk.LEFT, padx=2)
         ttk.Separator(tool_frame, orient=tk.VERTICAL).pack(side=tk.LEFT, fill=tk.Y, padx=6)
         ttk.Button(tool_frame, text="📄导出DOCX", command=self.export_docx).pack(side=tk.LEFT, padx=2)
+        ttk.Button(tool_frame, text="📄压缩DOCX", command=self.export_docx_compressed).pack(side=tk.LEFT, padx=2)
         ttk.Button(tool_frame, text="📄导出PDF", command=self.export_pdf).pack(side=tk.LEFT, padx=2)
         ttk.Separator(tool_frame, orient=tk.VERTICAL).pack(side=tk.LEFT, fill=tk.Y, padx=6)
         ttk.Button(tool_frame, text="📦 新建基线", command=self.backup_create_base).pack(side=tk.LEFT, padx=2)
@@ -384,6 +385,10 @@ class Viewer:
     def export_docx(self):
         """导出当前筛选记录为 DOCX"""
         _export_docx(self.current_date_filter, self.current_keyword)
+
+    def export_docx_compressed(self):
+        """导出当前筛选记录为 DOCX（图片压缩模式）"""
+        _export_docx(self.current_date_filter, self.current_keyword, compressed=True)
 
     def export_pdf(self):
         """导出当前筛选记录为 PDF"""

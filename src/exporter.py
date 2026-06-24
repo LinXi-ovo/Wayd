@@ -4,6 +4,8 @@ from datetime import datetime
 import tkinter as tk
 from tkinter import filedialog, messagebox
 import sqlite3
+from PIL import Image
+import io
 
 DB_FILE = "whatido.db"
 
@@ -25,7 +27,30 @@ def get_all_filtered_records(date_filter=None, keyword=None):
     conn.close()
     return rows
 
-def export_docx(date_filter, keyword):
+
+def _resize_image_for_docx(image_path, max_width=1200, quality=75):
+    """Compress image for DOCX embedding, return BytesIO"""
+    try:
+        img = Image.open(image_path)
+        if img.width > max_width:
+            ratio = max_width / img.width
+            new_size = (max_width, int(img.height * ratio))
+            img = img.resize(new_size, Image.LANCZOS)
+        if img.mode == "RGBA":
+            bg = Image.new("RGB", img.size, (255, 255, 255))
+            bg.paste(img, mask=img.split()[3])
+            img = bg
+        elif img.mode != "RGB":
+            img = img.convert("RGB")
+        buf = io.BytesIO()
+        img.save(buf, format="JPEG", quality=quality)
+        buf.seek(0)
+        return buf
+    except Exception as e:
+        print(f"[exporter] compress fail: {e}")
+        return None
+
+def export_docx(date_filter, keyword, compressed=False):
     """Export records as DOCX with embedded screenshots"""
     try:
         from docx import Document
@@ -77,7 +102,14 @@ def export_docx(date_filter, keyword):
             p.add_run(next_plan)
             if screenshot and os.path.exists(screenshot):
                 try:
-                    doc.add_picture(screenshot, width=Inches(5.5))
+                    if compressed:
+                        img_data = _resize_image_for_docx(screenshot)
+                        if img_data:
+                            doc.add_picture(img_data, width=Inches(5.5))
+                        else:
+                            doc.add_picture(screenshot, width=Inches(5.5))
+                    else:
+                        doc.add_picture(screenshot, width=Inches(5.5))
                 except Exception:
                     doc.add_paragraph("[截图嵌入失败]")
             else:
