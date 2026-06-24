@@ -21,6 +21,7 @@ import subprocess
 import signal
 import sys
 import atexit
+import winreg
 from datetime import datetime, timedelta
 from PIL import Image, ImageDraw, ImageGrab
 import pystray
@@ -38,26 +39,86 @@ os.makedirs(SCREENSHOT_DIR, exist_ok=True)
 # ── 动态配置（从 config.json 加载）──
 cfg_min_interval = 25 * 60    # 默认 25 分钟
 cfg_max_interval = 45 * 60    # 默认 45 分钟
+cfg_auto_start = False        # 开机自启
 
 def load_config():
-    global cfg_min_interval, cfg_max_interval
+    global cfg_min_interval, cfg_max_interval, cfg_auto_start
     try:
         if os.path.exists(CONFIG_FILE):
             with open(CONFIG_FILE, "r") as f:
                 data = json.load(f)
             cfg_min_interval = int(data.get("min_interval", cfg_min_interval))
             cfg_max_interval = int(data.get("max_interval", cfg_max_interval))
+            cfg_auto_start = bool(data.get("auto_start", False))
     except Exception as e:
         print(f"[config] 加载失败：{e}")
 
 def save_config():
     try:
         with open(CONFIG_FILE, "w") as f:
-            json.dump({"min_interval": cfg_min_interval, "max_interval": cfg_max_interval}, f, indent=2)
+            json.dump({
+                "min_interval": cfg_min_interval,
+                "max_interval": cfg_max_interval,
+                "auto_start": cfg_auto_start,
+            }, f, indent=2)
     except Exception as e:
         print(f"[config] 保存失败：{e}")
 
 load_config()
+
+# ── 开机自启管理 ──
+AUTO_START_NAME = "WAYD"
+
+def _get_pythonw():
+    """找到 pythonw.exe 路径"""
+    base = os.path.dirname(sys.executable)
+    pw = os.path.join(base, "pythonw.exe")
+    return pw if os.path.exists(pw) else sys.executable
+
+def _get_startup_cmd():
+    """生成用于注册表的命令行（pythonw.exe + 脚本绝对路径）"""
+    pw = _get_pythonw()
+    script = os.path.abspath(__file__)
+    return f'"{pw}" "{script}"'
+
+def is_auto_start_registered():
+    """检查注册表中是否已注册 WAYD 开机自启"""
+    try:
+        key = winreg.OpenKey(
+            winreg.HKEY_CURRENT_USER,
+            r"Software\Microsoft\Windows\CurrentVersion\Run",
+            0, winreg.KEY_READ
+        )
+        winreg.QueryValueEx(key, AUTO_START_NAME)
+        winreg.CloseKey(key)
+        return True
+    except FileNotFoundError:
+        return False
+    except Exception:
+        return False
+
+def set_auto_start(enable):
+    """设置或取消开机自启"""
+    try:
+        key = winreg.OpenKey(
+            winreg.HKEY_CURRENT_USER,
+            r"Software\Microsoft\Windows\CurrentVersion\Run",
+            0, winreg.KEY_SET_VALUE
+        )
+        if enable:
+            cmd = _get_startup_cmd()
+            winreg.SetValueEx(key, AUTO_START_NAME, 0, winreg.REG_SZ, cmd)
+        else:
+            try:
+                winreg.DeleteValue(key, AUTO_START_NAME)
+            except FileNotFoundError:
+                pass
+        winreg.CloseKey(key)
+        return True
+    except Exception as e:
+        print(f"[startup] 设置失败：{e}")
+        return False
+
 
 # ── 线程间通信 ──
 stop_event = threading.Event()      # 全局停止信号
@@ -85,10 +146,13 @@ def set_remaining(val):
     with state_lock:
         _remaining = val
 
-def set_interval_config(min_val, max_val):
-    global cfg_min_interval, cfg_max_interval
+def set_interval_config(min_val, max_val, auto_start=None):
+    global cfg_min_interval, cfg_max_interval, cfg_auto_start
     cfg_min_interval = min_val
     cfg_max_interval = max_val
+    if auto_start is not None:
+        cfg_auto_start = auto_start
+        set_auto_start(auto_start)
     save_config()
 
 # ── 数据库 ──
@@ -287,6 +351,9 @@ def main():
         refresh_stats()
 
         ttk.Label(info_frame, textvariable=remain_text, font=("Arial", 10, "bold")).pack(anchor=tk.W, pady=2)
+        startup_status_text = tk.StringVar(value="")
+        ttk.Label(info_frame, textvariable=startup_status_text, font=("Arial", 9)).pack(anchor=tk.W, pady=2)
+        _update_startup_status(startup_status_text)
 
         btn_frame = ttk.Frame(main_frame)
         btn_frame.pack(fill=tk.X, pady=(10, 0))
@@ -315,6 +382,15 @@ def main():
         refresh_stats()
         update_remaining_display()
 
+    def _update_startup_status(text_var):
+        try:
+            on = is_auto_start_registered()
+            text_var.set("🖥️ 开机自启：" + ("✅ 已开启" if on else "❌ 未开启"))
+        except Exception:
+            text_var.set("")
+        if not stop_event.is_set():
+            root.after(30000, lambda: _update_startup_status(text_var))
+
     def refresh_stats():
         try:
             conn = sqlite3.connect(DB_FILE)
@@ -332,15 +408,16 @@ def main():
     def open_viewer():
         viewer_path = os.path.join(os.path.dirname(__file__), "view.py")
         if os.path.exists(viewer_path):
-            subprocess.Popen([sys.executable, viewer_path], shell=True)
+            pw = _get_pythonw()
+            subprocess.Popen([pw, viewer_path], shell=True)
         else:
             messagebox.showerror("错误", f"找不到 view.py：{viewer_path}")
         root.withdraw()
 
     def open_settings():
         dialog = tk.Toplevel(root)
-        dialog.title("⚙️ 间隔设置")
-        dialog.geometry("320x200")
+        dialog.title("⚙️ 设置")
+        dialog.geometry("360x320")
         dialog.resizable(False, False)
         dialog.transient(root)
         dialog.grab_set()
@@ -348,7 +425,7 @@ def main():
         frame = ttk.Frame(dialog, padding=16)
         frame.pack(fill=tk.BOTH, expand=True)
 
-        ttk.Label(frame, text="设置弹窗间隔时间", font=("Arial", 12, "bold")).pack(pady=(0, 10))
+        ttk.Label(frame, text="弹窗间隔设置", font=("Arial", 12, "bold")).pack(pady=(0, 10))
         ttk.Separator(frame).pack(fill=tk.X, pady=4)
 
         ttk.Label(frame, text="下限（秒）：").pack(anchor=tk.W, pady=(6, 0))
@@ -361,6 +438,21 @@ def main():
         max_entry = ttk.Entry(frame, textvariable=max_var, width=15)
         max_entry.pack(anchor=tk.W, pady=2)
 
+        ttk.Separator(frame).pack(fill=tk.X, pady=(12, 4))
+
+        # 开机自启
+        auto_var = tk.BooleanVar(value=cfg_auto_start)
+        auto_cb = ttk.Checkbutton(
+            frame, text="🖥️ 开机自动启动（关闭终端后仍在后台运行）",
+            variable=auto_var
+        )
+        auto_cb.pack(anchor=tk.W, pady=4)
+
+        # 提示文字
+        startup_status = is_auto_start_registered()
+        status_text = "✅ 已注册" if startup_status else "❌ 未注册"
+        ttk.Label(frame, text=f"当前状态：{status_text}", font=("Arial", 9)).pack(anchor=tk.W, pady=(0, 6))
+
         def on_save():
             try:
                 new_min = int(min_var.get().strip())
@@ -369,9 +461,14 @@ def main():
                     raise ValueError("必须为正数")
                 if new_min > new_max:
                     raise ValueError("下限不能大于上限")
-                set_interval_config(new_min, new_max)
+                set_interval_config(new_min, new_max, auto_start=auto_var.get())
                 dialog.destroy()
-                messagebox.showinfo("成功", f"间隔已更新：{new_min} ~ {new_max} 秒")
+                msg = f"间隔已更新：{new_min} ~ {new_max} 秒"
+                if auto_var.get():
+                    msg += "\n开机自启：已开启 ✅"
+                else:
+                    msg += "\n开机自启：已关闭"
+                messagebox.showinfo("成功", msg)
             except ValueError as e:
                 messagebox.showerror("输入错误", str(e))
 
